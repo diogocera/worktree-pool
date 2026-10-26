@@ -1,0 +1,819 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+VERSION="2.4.0"
+DEFAULT_BASE="dev"
+DEFAULT_PORT_BASE=3100
+
+usage() {
+  cat <<'EOF'
+wt — reusable Git worktree slot manager
+
+Worktree layout:
+
+  <repo>/
+    worktrees/
+      wt-1/
+      wt-2/
+      wt-3/
+      ...
+
+Usage:
+  wt <command> [arguments]
+  wt --help
+  wt --version
+
+Commands:
+
+  init [N]
+      Create N reusable worktree slots.
+
+      Slots start in detached HEAD state and are considered FREE.
+
+      Default:
+        N = 5
+
+      Example:
+        wt init 6
+
+  list
+      Show all worktree slots and their status.
+
+      Example:
+        wt list
+
+  assign <BRANCH> [--base BASE]     (alias: a)
+      Assign a branch to the first free slot.
+
+      If BRANCH already exists locally:
+        Check out the existing branch.
+
+      If BRANCH exists on origin:
+        Create a local tracking branch.
+
+      If BRANCH does not exist:
+        Create it from BASE.
+
+      Default BASE:
+        dev
+
+      Examples:
+        wt assign feature/payments
+        wt assign feature/payments --base dev
+        wt assign feature/experiment --base main
+        wt a feature/payments
+
+  release [SLOT]                    (aliases: r, free)
+      Release a worktree slot.
+
+      If SLOT is omitted, release the current worktree.
+
+      Before asking for confirmation, lists:
+        - uncommitted and untracked files
+        - commits not yet pushed
+
+      This:
+        - destroys uncommitted changes
+        - removes untracked files
+        - returns the slot to detached HEAD
+
+      The feature branch itself is NOT deleted.
+
+      Examples:
+        wt release wt-3
+        wt r              # from inside the worktree
+
+  path [SLOT]
+      Print the absolute path of a worktree.
+
+      If SLOT is omitted, detect the current worktree.
+
+      Examples:
+        wt path wt-3
+        wt path
+
+  port [SLOT]
+      Print the development port for a worktree.
+
+      If SLOT is omitted, detect the current worktree.
+
+      Port mapping:
+        wt-1 -> 3101
+        wt-2 -> 3102
+        wt-3 -> 3103
+        ...
+
+      Examples:
+        wt port wt-3
+        wt port
+
+  url [SLOT]
+      Print the development URL for a worktree.
+
+      If SLOT is omitted, detect the current worktree.
+
+      Examples:
+        wt url wt-3
+        wt url
+
+      Output:
+        http://localhost:3103
+
+  start <SLOT> <COMMAND> [ARGS...]
+      Run a command inside a worktree.
+
+      Examples:
+        wt start wt-3 bin/dev
+        wt start wt-2 bundle exec rails console
+
+  doctor
+      Show Git and worktree diagnostics.
+
+Examples:
+
+  # Create six reusable slots
+  wt init 6
+
+  # See available slots
+  wt list
+
+  # Create a new branch from dev
+  wt assign feature/payments
+
+  # Attach an existing branch
+  wt assign feature/already-started
+
+  # Create from another base branch
+  wt assign feature/experiment --base main
+
+  # Open a slot in Cursor
+  cursor "$(wt path wt-3)"
+
+  # Start the development server
+  wt start wt-3 bin/dev
+
+  # Get the URL
+  wt url wt-3
+
+  # From inside wt-3
+  wt url
+  # http://localhost:3103
+
+  # Open the current worktree
+  open "$(wt url)"
+
+  # Feature is finished; recycle the slot
+  wt release wt-3
+
+Important:
+
+  • Run wt from anywhere inside the repository.
+  • Worktrees are stored in <repo>/worktrees/.
+  • Git is the source of truth; no state file is used.
+  • FREE slots are detached HEAD worktrees.
+  • The base branch is only used when creating a NEW branch.
+  • Ports are derived from slot numbers.
+  • release is destructive to uncommitted/untracked files.
+EOF
+}
+
+die() {
+  echo "wt: $*" >&2
+  exit 1
+}
+
+#
+# Git / repository helpers
+#
+
+git_root() {
+  git rev-parse --show-toplevel 2>/dev/null ||
+    die "not inside a Git repository"
+}
+
+main_worktree() {
+  git worktree list --porcelain 2>/dev/null |
+    awk '
+      /^worktree / {
+        print substr($0, 10)
+        exit
+      }
+    ' ||
+    die "not inside a Git repository"
+}
+
+repo_root() {
+  main_worktree
+}
+
+worktrees_dir() {
+  printf '%s/worktrees\n' "$(repo_root)"
+}
+
+#
+# Slot helpers
+#
+
+validate_slot() {
+  local slot="$1"
+
+  [[ "$slot" =~ ^wt-[0-9]+$ ]] ||
+    die "invalid slot '$slot' (expected wt-N)"
+}
+
+slot_number() {
+  local slot="$1"
+
+  validate_slot "$slot"
+
+  printf '%s\n' "${slot#wt-}"
+}
+
+slot_path() {
+  local slot="$1"
+
+  validate_slot "$slot"
+
+  printf '%s/%s\n' "$(worktrees_dir)" "$slot"
+}
+
+slot_port() {
+  local slot="$1"
+  local number
+
+  number="$(slot_number "$slot")"
+
+  printf '%s\n' "$((DEFAULT_PORT_BASE + number))"
+}
+
+slot_url() {
+  local slot="$1"
+
+  printf 'http://localhost:%s\n' "$(slot_port "$slot")"
+}
+
+#
+# Current worktree detection
+#
+
+current_worktree_path() {
+  git rev-parse --show-toplevel 2>/dev/null ||
+    die "not inside a Git worktree"
+}
+
+current_slot() {
+  local path name
+
+  path="$(current_worktree_path)"
+  name="$(basename "$path")"
+
+  if [[ "$path" == "$(worktrees_dir)"/* ]] &&
+     [[ "$name" =~ ^wt-[0-9]+$ ]]; then
+    printf '%s\n' "$name"
+    return 0
+  fi
+
+  return 1
+}
+
+resolve_slot() {
+  if [[ $# -gt 1 ]]; then
+    die "expected zero or one slot"
+  fi
+
+  if [[ $# -eq 1 ]]; then
+    validate_slot "$1"
+    printf '%s\n' "$1"
+    return
+  fi
+
+  current_slot ||
+    die "current directory is not a managed worktree — specify a slot"
+}
+
+#
+# Worktree state
+#
+
+worktree_paths() {
+  git worktree list --porcelain |
+    awk '/^worktree / {print substr($0, 10)}' |
+    while IFS= read -r path; do
+      [[ "$path" == "$(worktrees_dir)"/* ]] || continue
+
+      local name
+      name="$(basename "$path")"
+
+      [[ "$name" =~ ^wt-[0-9]+$ ]] || continue
+
+      printf '%s\n' "$path"
+    done
+}
+
+branch_for_path() {
+  git -C "$1" branch --show-current 2>/dev/null || true
+}
+
+slot_exists() {
+  local slot="$1"
+  local path
+
+  path="$(slot_path "$slot")"
+
+  git worktree list --porcelain |
+    awk -v target="$path" '
+      /^worktree / {
+        path = substr($0, 10)
+        if (path == target) {
+          found = 1
+        }
+      }
+      END {
+        exit(found ? 0 : 1)
+      }
+    '
+}
+
+#
+# Base branch
+#
+
+base_branch() {
+  printf '%s\n' "${WT_BASE:-$DEFAULT_BASE}"
+}
+
+#
+# Commands
+#
+
+cmd_init() {
+  local count="${1:-5}"
+  local root path i
+
+  [[ "$count" =~ ^[1-9][0-9]*$ ]] ||
+    die "number of slots must be a positive integer"
+
+  [[ $# -le 1 ]] ||
+    die "usage: wt init [N]"
+
+  root="$(repo_root)"
+
+  mkdir -p "$(worktrees_dir)"
+
+  echo "Repository: $root"
+  echo "Worktrees:  $(worktrees_dir)"
+  echo "Slots:      $count"
+  echo
+
+  for ((i=1; i<=count; i++)); do
+    local slot="wt-$i"
+
+    path="$(slot_path "$slot")"
+
+    if slot_exists "$slot"; then
+      echo "$slot  exists — skipping"
+      continue
+    fi
+
+    # Detached HEAD means the slot does not consume a branch.
+    git worktree add --detach "$path" HEAD
+
+    echo "$slot  created (FREE)"
+  done
+}
+
+cmd_list() {
+  local path branch status
+  local found=0
+
+  echo "Repository: $(repo_root)"
+  echo "Worktrees:  $(worktrees_dir)"
+  echo
+
+  printf "%-8s %-10s %-35s %s\n" \
+    "SLOT" "STATUS" "BRANCH" "URL"
+
+  printf "%-8s %-10s %-35s %s\n" \
+    "----" "------" "------" "---"
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+
+    found=1
+
+    local slot port url
+
+    slot="$(basename "$path")"
+    branch="$(branch_for_path "$path")"
+    port="$(slot_port "$slot")"
+    url="http://localhost:$port"
+
+    if [[ -z "$branch" ]]; then
+      status="FREE"
+      branch="(detached)"
+    else
+      status="ACTIVE"
+    fi
+
+    printf "%-8s %-10s %-35s %s\n" \
+      "$slot" \
+      "$status" \
+      "$branch" \
+      "$url"
+
+  done < <(worktree_paths)
+
+  [[ "$found" -eq 1 ]] ||
+    echo "(no slots — run: wt init 5)"
+}
+
+branch_is_assigned() {
+  local target="$1"
+  local path branch
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+
+    branch="$(branch_for_path "$path")"
+
+    if [[ "$branch" == "$target" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done < <(worktree_paths)
+
+  return 1
+}
+
+find_free_slot() {
+  local path branch
+
+  while IFS= read -r path; do
+    [[ -n "$path" ]] || continue
+
+    branch="$(branch_for_path "$path")"
+
+    if [[ -z "$branch" ]]; then
+      printf '%s\n' "$path"
+      return 0
+    fi
+  done < <(worktree_paths)
+
+  return 1
+}
+
+cmd_assign() {
+  local branch
+  local base
+  local path
+  local existing_path
+  local slot
+
+  [[ $# -ge 1 ]] ||
+    die "usage: wt assign <BRANCH> [--base BASE]"
+
+  branch="$1"
+  shift
+
+  base="$(base_branch)"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --base)
+        [[ $# -ge 2 ]] ||
+          die "--base requires a branch name"
+
+        base="$2"
+        shift 2
+        ;;
+
+      *)
+        die "unknown argument '$1'"
+        ;;
+    esac
+  done
+
+  # Already assigned?
+  if existing_path="$(branch_is_assigned "$branch")"; then
+    slot="$(basename "$existing_path")"
+
+    echo "Branch '$branch' is already assigned:"
+    echo
+    echo "  Slot:   $slot"
+    echo "  Path:   $existing_path"
+    echo "  URL:    $(slot_url "$slot")"
+
+    return
+  fi
+
+  # Find a free slot.
+  if ! path="$(find_free_slot)"; then
+    die "no free slots — run 'wt list' or 'wt init N'"
+  fi
+
+  slot="$(basename "$path")"
+
+  # Existing local branch.
+  if git show-ref --verify --quiet "refs/heads/$branch"; then
+    echo "Assigning existing branch '$branch' to $slot..."
+
+    git -C "$path" switch "$branch"
+
+    echo
+    echo "Assigned:"
+    echo "  Slot:   $slot"
+    echo "  Branch: $branch"
+    echo "  Path:   $path"
+    echo "  URL:    $(slot_url "$slot")"
+    echo "  Mode:   existing branch"
+
+    return
+  fi
+
+  # Existing remote branch.
+  if git show-ref --verify --quiet "refs/remotes/origin/$branch"; then
+    echo "Creating local branch '$branch' from origin/$branch..."
+
+    git -C "$path" switch --track "origin/$branch"
+
+    echo
+    echo "Assigned:"
+    echo "  Slot:   $slot"
+    echo "  Branch: $branch"
+    echo "  Path:   $path"
+    echo "  URL:    $(slot_url "$slot")"
+    echo "  Mode:   existing remote branch"
+
+    return
+  fi
+
+  # New branch.
+  git show-ref --verify --quiet "refs/heads/$base" ||
+    die "base branch '$base' does not exist locally"
+
+  echo "Creating '$branch' from '$base'..."
+
+  # The slot is detached, so it can temporarily point at the base branch
+  # without claiming the base branch.
+  git -C "$path" switch --detach "$base"
+  git -C "$path" switch -c "$branch"
+
+  echo
+  echo "Assigned:"
+  echo "  Slot:   $slot"
+  echo "  Branch: $branch"
+  echo "  Path:   $path"
+  echo "  URL:    $(slot_url "$slot")"
+  echo "  Mode:   new branch"
+  echo "  Base:   $base"
+}
+
+show_pending_changes() {
+  local path="$1"
+  local status unpushed upstream
+
+  status="$(git -C "$path" status --short --untracked-files=all 2>/dev/null || true)"
+
+  if upstream="$(git -C "$path" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"; then
+    unpushed="$(git -C "$path" log --oneline '@{u}..HEAD' 2>/dev/null || true)"
+  else
+    upstream=""
+    unpushed="$(git -C "$path" log --oneline HEAD --not --remotes 2>/dev/null || true)"
+  fi
+
+  echo "Uncommitted changes (will be DESTROYED):"
+  if [[ -n "$status" ]]; then
+    printf '%s\n' "$status" | sed 's/^/    /'
+  else
+    echo "    (none)"
+  fi
+  echo
+
+  if [[ -n "$upstream" ]]; then
+    echo "Unpushed commits (not on $upstream — kept on the branch):"
+  else
+    echo "Unpushed commits (branch has no upstream; not on any remote — kept on the branch):"
+  fi
+  if [[ -n "$unpushed" ]]; then
+    printf '%s\n' "$unpushed" | sed 's/^/    /'
+  else
+    echo "    (none)"
+  fi
+  echo
+}
+
+cmd_release() {
+  local slot="$1"
+  local path
+  local branch
+  local answer
+
+  validate_slot "$slot"
+
+  path="$(slot_path "$slot")"
+
+  slot_exists "$slot" ||
+    die "$slot does not exist"
+
+  branch="$(branch_for_path "$path")"
+
+  if [[ -z "$branch" ]]; then
+    echo "$slot is already FREE"
+    return
+  fi
+
+  echo "Releasing $slot"
+  echo
+  echo "  Branch: $branch"
+  echo "  Path:   $path"
+  echo "  URL:    $(slot_url "$slot")"
+  echo
+
+  show_pending_changes "$path"
+
+  echo "WARNING:"
+  echo "  Uncommitted changes will be destroyed."
+  echo "  Untracked files will be deleted."
+  echo "  The branch '$branch' will NOT be deleted."
+  echo
+
+  read -r -p "Continue? [y/N] " answer
+
+  [[ "$answer" =~ ^[Yy]$ ]] || {
+    echo "Cancelled."
+    return
+  }
+
+  git -C "$path" reset --hard
+  git -C "$path" clean -fd
+
+  # Detach without deleting the feature branch.
+  git -C "$path" switch --detach HEAD
+
+  echo
+  echo "$slot is now FREE"
+}
+
+cmd_path() {
+  local slot="$1"
+  local path
+
+  path="$(slot_path "$slot")"
+
+  slot_exists "$slot" ||
+    die "$slot does not exist"
+
+  printf '%s\n' "$path"
+}
+
+cmd_port() {
+  local slot="$1"
+
+  slot_exists "$slot" ||
+    die "$slot does not exist"
+
+  slot_port "$slot"
+}
+
+cmd_url() {
+  local slot="$1"
+
+  slot_exists "$slot" ||
+    die "$slot does not exist"
+
+  slot_url "$slot"
+}
+
+cmd_start() {
+  local slot="$1"
+  shift
+
+  local path
+
+  path="$(slot_path "$slot")"
+
+  slot_exists "$slot" ||
+    die "$slot does not exist"
+
+  [[ $# -gt 0 ]] ||
+    die "usage: wt start <SLOT> <COMMAND> [ARGS...]"
+
+  cd "$path"
+  exec "$@"
+}
+
+cmd_doctor() {
+  echo "Repository:"
+  echo "  $(repo_root)"
+  echo
+
+  echo "Worktrees directory:"
+  echo "  $(worktrees_dir)"
+  echo
+
+  echo "Git worktrees:"
+  git worktree list
+  echo
+
+  echo "Slots:"
+  cmd_list
+}
+
+#
+# Main
+#
+
+main() {
+  case "${1:-}" in
+
+    --help|-h|help)
+      usage
+      ;;
+
+    --version|-v)
+      echo "wt $VERSION"
+      ;;
+
+    init)
+      shift
+      cmd_init "$@"
+      ;;
+
+    list|ls)
+      shift
+      [[ $# -eq 0 ]] ||
+        die "usage: wt list"
+      cmd_list
+      ;;
+
+    assign|a)
+      shift
+      cmd_assign "$@"
+      ;;
+
+    release|free|r)
+      shift
+      [[ $# -le 1 ]] ||
+        die "usage: wt release [SLOT]"
+
+      local slot
+      slot="$(resolve_slot "$@")"
+      cmd_release "$slot"
+      ;;
+
+    path)
+      shift
+      [[ $# -le 1 ]] ||
+        die "usage: wt path [SLOT]"
+
+      local slot
+      slot="$(resolve_slot "$@")"
+      cmd_path "$slot"
+      ;;
+
+    port)
+      shift
+      [[ $# -le 1 ]] ||
+        die "usage: wt port [SLOT]"
+
+      local slot
+      slot="$(resolve_slot "$@")"
+      cmd_port "$slot"
+      ;;
+
+    url)
+      shift
+      [[ $# -le 1 ]] ||
+        die "usage: wt url [SLOT]"
+
+      local slot
+      slot="$(resolve_slot "$@")"
+      cmd_url "$slot"
+      ;;
+
+    start)
+      shift
+      [[ $# -ge 2 ]] ||
+        die "usage: wt start <SLOT> <COMMAND> [ARGS...]"
+      cmd_start "$@"
+      ;;
+
+    doctor)
+      shift
+      [[ $# -eq 0 ]] ||
+        die "usage: wt doctor"
+      cmd_doctor
+      ;;
+
+    "")
+      usage
+      ;;
+
+    *)
+      die "unknown command '$1' — run 'wt --help'"
+      ;;
+
+  esac
+}
+
+main "$@"
