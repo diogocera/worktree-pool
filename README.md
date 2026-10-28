@@ -70,7 +70,9 @@ The base is `--base BASE`, else `$WT_BASE`, else `dev`.
 
 ### `release`
 
-`wt release` is **destructive to uncommitted work**: it runs `git reset --hard` and `git clean -fd`, then detaches HEAD. Before asking for confirmation it lists uncommitted and untracked files and any unpushed commits. The branch and its commits are kept.
+`wt release` is **destructive to uncommitted work**: it runs `git reset --hard` and `git clean -fd`, then detaches HEAD at the base branch (`$WT_BASE`, else `dev`). Before asking for confirmation it lists uncommitted and untracked files and any unpushed commits. The branch and its commits are kept.
+
+Releasing a slot that is already FREE updates it to the base branch's current commit. If the slot has uncommitted changes or commits on no branch, they are listed and confirmation is asked first.
 
 ## Ports
 
