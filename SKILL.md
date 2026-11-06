@@ -46,7 +46,7 @@ description: Use when working in a Git repo that uses the `wt` worktree slot man
 1. Branch already assigned to a slot → prints that slot and does nothing.
 2. Local branch exists → checks it out.
 3. `origin/<BRANCH>` exists → creates a tracking branch.
-4. Otherwise → creates a new branch from BASE (`--base`, else `$WT_BASE`, else `dev`). BASE must exist locally.
+4. Otherwise → fetches `origin/BASE` and creates a new branch from it (BASE is `--base`, else `$WT_BASE`, else `dev`). Falls back to local BASE if there's no remote copy; BASE must exist in one of the two.
 
 Run `git fetch` first if the branch may only exist on the remote.
 
