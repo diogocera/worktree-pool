@@ -45,7 +45,7 @@ wt r                         # done: release the current slot
 
 | Command | Alias | Description |
 |---|---|---|
-| `wt init [N]` | | Create N free slots (default 5). Existing ones are skipped. |
+| `wt init [N]` | | Create N free slots (default 5). Existing ones are skipped. Untracked `.env` / `.env.*` files from the main checkout (except under `scripts/`) are copied into every slot that lacks them. |
 | `wt list` | `ls` | Show each slot's status, branch and URL. |
 | `wt assign <BRANCH> [--base BASE]` | `a` | Assign BRANCH to the first free slot. |
 | `wt release [SLOT]` | `r`, `free` | Reset a slot and return it to FREE. |
