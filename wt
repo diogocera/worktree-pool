@@ -306,8 +306,11 @@ worktree_paths() {
 
       [[ "$name" =~ ^wt-[0-9]+$ ]] || continue
 
-      printf '%s\n' "$path"
-    done
+      # Prefix the slot number so wt-2 sorts before wt-10.
+      printf '%s\t%s\n' "${name#wt-}" "$path"
+    done |
+    sort -n -k1,1 |
+    cut -f2-
 }
 
 branch_for_path() {
