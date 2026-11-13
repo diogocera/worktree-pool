@@ -64,7 +64,7 @@ Wherever `[SLOT]` is optional, `wt` uses the slot you're currently inside.
 1. Already in a slot → tells you which one.
 2. Exists locally → checks it out.
 3. Exists on `origin` → creates a local tracking branch (`git fetch` first).
-4. Doesn't exist → creates it from the base branch.
+4. Doesn't exist → fetches `origin/<base>` and creates it from there, so it starts at the latest base commit. Falls back to the local base branch if there's no remote copy.
 
 The base is `--base BASE`, else `$WT_BASE`, else `dev`.
 

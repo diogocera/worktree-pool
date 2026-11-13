@@ -52,7 +52,8 @@ Commands:
         Create a local tracking branch.
 
       If BRANCH does not exist:
-        Create it from BASE.
+        Fetch origin/BASE and create it from there, so it starts at
+        the latest BASE. Without a remote copy, use local BASE.
 
       Default BASE:
         dev
@@ -473,6 +474,7 @@ cmd_assign() {
   local path
   local existing_path
   local slot
+  local start
 
   [[ $# -ge 1 ]] ||
     die "usage: wt assign <BRANCH> [--base BASE]"
@@ -552,16 +554,31 @@ cmd_assign() {
     return
   fi
 
-  # New branch.
-  git show-ref --verify --quiet "refs/heads/$base" ||
-    die "base branch '$base' does not exist locally"
+  # New branch, from the latest base on origin when there is one.
+  start="$base"
 
-  echo "Creating '$branch' from '$base'..."
+  if git remote get-url origin >/dev/null 2>&1; then
+    echo "Fetching origin/$base..."
+
+    if ! git fetch --quiet origin "$base"; then
+      echo "warning: could not fetch origin/$base; using the last fetched copy if any" >&2
+    fi
+
+    if git show-ref --verify --quiet "refs/remotes/origin/$base"; then
+      start="origin/$base"
+    fi
+  fi
+
+  [[ "$start" != "$base" ]] || git show-ref --verify --quiet "refs/heads/$base" ||
+    die "base branch '$base' does not exist locally or on origin"
+
+  echo "Creating '$branch' from '$start'..."
 
   # The slot is detached, so it can temporarily point at the base branch
-  # without claiming the base branch.
-  git -C "$path" switch --detach "$base"
-  git -C "$path" switch -c "$branch"
+  # without claiming the base branch. --no-track keeps the new branch from
+  # taking origin/BASE as its upstream.
+  git -C "$path" switch --detach "$start"
+  git -C "$path" switch --no-track -c "$branch"
 
   echo
   echo "Assigned:"
@@ -570,7 +587,7 @@ cmd_assign() {
   echo "  Path:   $path"
   echo "  URL:    $(slot_url "$slot")"
   echo "  Mode:   new branch"
-  echo "  Base:   $base"
+  echo "  Base:   $start"
 }
 
 show_pending_changes() {
