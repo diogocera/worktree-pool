@@ -75,9 +75,14 @@ Commands:
       This:
         - destroys uncommitted changes
         - removes untracked files
-        - returns the slot to detached HEAD
+        - returns the slot to detached HEAD at the base branch
+          ($WT_BASE, else dev)
 
       The feature branch itself is NOT deleted.
+
+      Releasing a slot that is already FREE moves it to the current base
+      branch commit. If it has uncommitted changes or commits on no
+      branch, they are listed and confirmation is asked first.
 
       Examples:
         wt release wt-3
@@ -606,6 +611,7 @@ cmd_release() {
   local slot="$1"
   local path
   local branch
+  local base
   local answer
 
   validate_slot "$slot"
@@ -618,7 +624,7 @@ cmd_release() {
   branch="$(branch_for_path "$path")"
 
   if [[ -z "$branch" ]]; then
-    echo "$slot is already FREE"
+    refresh_free_slot "$slot" "$path"
     return
   fi
 
@@ -647,11 +653,75 @@ cmd_release() {
   git -C "$path" reset --hard
   git -C "$path" clean -fd
 
-  # Detach without deleting the feature branch.
-  git -C "$path" switch --detach HEAD
+  # Detach at the base branch without claiming it or deleting the feature branch.
+  base="$(base_branch)"
+
+  if git show-ref --verify --quiet "refs/heads/$base"; then
+    git -C "$path" switch --detach "$base"
+  else
+    echo "warning: base branch '$base' does not exist locally; detaching at current commit" >&2
+    git -C "$path" switch --detach HEAD
+    base="current commit"
+  fi
 
   echo
-  echo "$slot is now FREE"
+  echo "$slot is now FREE (detached at $base)"
+}
+
+# Move an already-FREE slot to the current base branch commit.
+refresh_free_slot() {
+  local slot="$1"
+  local path="$2"
+  local base
+  local status
+  local orphaned
+  local answer
+
+  base="$(base_branch)"
+
+  git show-ref --verify --quiet "refs/heads/$base" ||
+    die "$slot is already FREE; base branch '$base' does not exist locally"
+
+  status="$(git -C "$path" status --short --untracked-files=all)"
+  # Commits made on the detached HEAD that no branch or remote holds.
+  orphaned="$(git -C "$path" log --oneline HEAD --not --branches --remotes)"
+
+  if [[ -n "$status" || -n "$orphaned" ]]; then
+    echo "$slot is FREE but has work that updating to '$base' would discard:"
+    echo
+
+    if [[ -n "$status" ]]; then
+      echo "Uncommitted changes (will be DESTROYED):"
+      printf '%s\n' "$status" | sed 's/^/    /'
+      echo
+    fi
+
+    if [[ -n "$orphaned" ]]; then
+      echo "Commits on no branch (will be ORPHANED):"
+      printf '%s\n' "$orphaned" | sed 's/^/    /'
+      echo
+    fi
+
+    read -r -p "Continue? [y/N] " answer
+
+    [[ "$answer" =~ ^[Yy]$ ]] || {
+      echo "Cancelled."
+      return
+    }
+
+    git -C "$path" reset --hard
+    git -C "$path" clean -fd
+  fi
+
+  if [[ "$(git -C "$path" rev-parse HEAD)" == "$(git rev-parse "refs/heads/$base")" ]]; then
+    echo "$slot is already FREE (detached at $base)"
+    return
+  fi
+
+  git -C "$path" switch --detach "$base"
+
+  echo
+  echo "$slot is FREE (updated to $base)"
 }
 
 cmd_path() {

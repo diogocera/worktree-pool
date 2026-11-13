@@ -65,9 +65,10 @@ Pass the slot's port to whatever needs it, e.g. `PORT=$(wt port) bin/dev`, so pa
 
 ## Releasing safely
 
-`release` is destructive: it runs `git reset --hard` and `git clean -fd` in the slot, then detaches HEAD. The branch itself is kept, as are its commits.
+`release` is destructive: it runs `git reset --hard` and `git clean -fd` in the slot, then detaches HEAD at the base branch's commit (`$WT_BASE`, else `dev`). The branch itself is kept, as are its commits.
 
 - It first prints uncommitted/untracked files and unpushed commits, then asks `Continue? [y/N]` on stdin.
+- On an already-FREE slot it moves the slot to the base branch's current commit. It asks first only if the slot has uncommitted changes or commits on no branch.
 - **Never release a slot without the user's explicit OK**, and never pipe `y` into it on your own initiative.
 - Before asking, commit or stash anything worth keeping, and mention unpushed commits so the user can push first.
 - Don't release a slot with a running dev server; stop it first.
