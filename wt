@@ -30,6 +30,11 @@ Commands:
 
       Slots start in detached HEAD state and are considered FREE.
 
+      Untracked .env and .env.* files in the main checkout (except
+      those under scripts/) are copied into each slot, keeping their
+      paths. Files a slot already has are not overwritten, so rerun
+      init to copy new ones into existing slots.
+
       Default:
         N = 5
 
@@ -349,6 +354,36 @@ base_branch() {
 }
 
 #
+# Environment files
+#
+
+# Copy the main checkout's untracked .env / .env.* files into a slot,
+# keeping their relative paths. Files under scripts/ are left out, and
+# files the slot already has are never overwritten.
+copy_env_files() {
+  local path="$1"
+  local root file name
+
+  root="$(repo_root)"
+
+  # --others without --exclude-standard lists ignored files too;
+  # --directory collapses untracked folders such as worktrees/.
+  while IFS= read -r -d '' file; do
+    name="$(basename "$file")"
+
+    [[ "$name" == ".env" || "$name" == .env.* ]] || continue
+    [[ "$file" != scripts/* ]] || continue
+    [[ -f "$root/$file" ]] || continue
+    [[ ! -e "$path/$file" ]] || continue
+
+    mkdir -p "$(dirname "$path/$file")"
+    cp -p "$root/$file" "$path/$file"
+
+    echo "      copied $file"
+  done < <(git -C "$root" ls-files -z --others --directory)
+}
+
+#
 # Commands
 #
 
@@ -378,6 +413,7 @@ cmd_init() {
 
     if slot_exists "$slot"; then
       echo "$slot  exists — skipping"
+      copy_env_files "$path"
       continue
     fi
 
@@ -385,6 +421,7 @@ cmd_init() {
     git worktree add --detach "$path" HEAD
 
     echo "$slot  created (FREE)"
+    copy_env_files "$path"
   done
 }
 

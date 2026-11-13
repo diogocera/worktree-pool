@@ -29,7 +29,7 @@ description: Use when working in a Git repo that uses the `wt` worktree slot man
 
 | Command | Alias | What it does |
 |---|---|---|
-| `wt init [N]` | | Create N free slots (default 5). Existing slots are skipped. |
+| `wt init [N]` | | Create N free slots (default 5). Existing slots are skipped. Copies untracked `.env` / `.env.*` files from the main checkout (except under `scripts/`) into every slot that lacks them. |
 | `wt list` | `ls` | Show every slot: status, branch, URL. |
 | `wt assign <BRANCH> [--base BASE]` | `a` | Put BRANCH into the first free slot. |
 | `wt release [SLOT]` | `r`, `free` | Reset the slot and return it to FREE. No SLOT = current worktree. |
